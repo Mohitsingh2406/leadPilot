@@ -13,10 +13,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className="bg-slate-950 text-slate-100 antialiased min-h-screen flex flex-col font-sans">
+    <html lang="en" className="dark h-full">
+      <body className="h-full max-h-screen overflow-hidden bg-mesh-dark text-slate-100 flex flex-col font-sans select-none">
         <Navbar />
-        <main className="flex-1 flex flex-col overflow-hidden">{children}</main>
+        <main className="flex-1 flex flex-col overflow-hidden min-h-0 relative">
+          {children}
+        </main>
       </body>
     </html>
   );
