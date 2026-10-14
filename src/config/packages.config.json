@@ -1,0 +1,120 @@
+{
+  "company": "Spacenos",
+  "product": "LeadPilot AI Sales Suite",
+  "currency": "USD",
+  "version": "2026.1",
+  "discountsAllowed": false,
+  "maxDiscountPercent": 0,
+  "packages": [
+    {
+      "id": "starter",
+      "name": "Starter Launchpad",
+      "tagline": "Best for seed startups and small sales teams qualifying initial traffic",
+      "pricing": {
+        "monthly": 499,
+        "annual": 4990,
+        "billingOptions": ["monthly", "annual"]
+      },
+      "idealTeamSize": "1 - 5 sales reps",
+      "minBudget": 400,
+      "maxLeadsPerMonth": 1000,
+      "features": [
+        "Up to 5 sales seats",
+        "1,000 inbound qualified leads/month",
+        "Standard AI qualification funnel (5 core dimensions)",
+        "Direct Google Calendar / Calendly booking integration",
+        "HubSpot & Salesforce standard CRM export",
+        "Standard Email Support (24h SLA)"
+      ],
+      "prohibitedClaims": [
+        "unlimited seats",
+        "custom SSO",
+        "dedicated CSM",
+        "free setup"
+      ]
+    },
+    {
+      "id": "growth",
+      "name": "Growth Accelerator",
+      "tagline": "Ideal for scaling B2B companies demanding higher conversion and CRM sync",
+      "pricing": {
+        "monthly": 1499,
+        "annual": 14990,
+        "billingOptions": ["monthly", "annual"]
+      },
+      "idealTeamSize": "6 - 25 sales reps",
+      "minBudget": 1200,
+      "maxLeadsPerMonth": 10000,
+      "features": [
+        "Up to 25 sales seats",
+        "10,000 inbound qualified leads/month",
+        "Advanced conversational AI qualification & custom scoring",
+        "Instant multi-rep calendar round-robin booking",
+        "Bi-directional HubSpot, Salesforce & Pipedrive sync",
+        "Slack & Microsoft Teams instant prospect alerts",
+        "Priority Support (2h response SLA)"
+      ],
+      "prohibitedClaims": [
+        "unlimited seats",
+        "custom on-premise deployment"
+      ]
+    },
+    {
+      "id": "enterprise",
+      "name": "Enterprise Scale",
+      "tagline": "Engineered for high-volume enterprises needing custom security and governance",
+      "pricing": {
+        "monthly": 3999,
+        "annual": 39990,
+        "billingOptions": ["monthly", "annual"]
+      },
+      "idealTeamSize": "25+ sales reps or multi-team orgs",
+      "minBudget": 3500,
+      "maxLeadsPerMonth": 100000,
+      "features": [
+        "Unlimited sales seats",
+        "100,000+ inbound leads/month",
+        "Custom domain white-labeling & multi-brand routing",
+        "Custom AI sales agent prompts & persona tuning",
+        "Enterprise SAML/SSO (Okta, Azure AD)",
+        "Dedicated Customer Success Manager (CSM)",
+        "99.99% Uptime SLA & 24/7 dedicated escalation bridge",
+        "SOC2 Type II & HIPAA compliance packages"
+      ],
+      "prohibitedClaims": []
+    }
+  ],
+  "addons": [
+    {
+      "id": "dedicated_ip",
+      "name": "Dedicated IP & Phone Bridge",
+      "monthlyPrice": 199,
+      "description": "Private outbound routing and Twilio voice transfer support."
+    },
+    {
+      "id": "custom_webhooks",
+      "name": "Custom Webhook & Data Sync",
+      "monthlyPrice": 399,
+      "description": "Real-time streaming webhooks to Snowflake, BigQuery, or internal data lakes."
+    },
+    {
+      "id": "multibrand",
+      "name": "Multi-Brand & Multi-Domain Workspace",
+      "monthlyPrice": 499,
+      "description": "Run distinct qualification personas across up to 5 business brands."
+    },
+    {
+      "id": "soc2_package",
+      "name": "SOC2 Security & Audit Log Stream",
+      "monthlyPrice": 799,
+      "description": "Immutable SIEM log export, GDPR compliance package, and custom DPA."
+    }
+  ],
+  "rules": {
+    "noUnauthorizedDiscounts": true,
+    "strictTierMatching": true,
+    "requireDecisionMakerCheck": true,
+    "requireBudgetVerification": true
+  }
+}
+

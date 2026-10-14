@@ -1,0 +1,346 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: leads
+// Document ID: leadId (e.g., 'lead-01', 'lead-m1abc2')
+// Fields:
+//   - id: string (required, 1-100 chars, immutable) - Unique lead identifier
+//   - conversationId: string (optional, 1-100 chars, immutable) - Linked conversation ID
+//   - stage: string (required, enum: 'new', 'qualified', 'proposal_sent', 'booked', 'won', 'lost') - Sales pipeline stage
+//   - score: number (required, 0-100) - BANT qualification score
+//   - scoreRationale: string (optional, max 2000 chars) - Reason for qualification score
+//   - fitLevel: string (optional, enum: 'low', 'medium', 'high', 'unqualified') - Categorical fit
+//   - extractedFields: map (required, max 30 keys) - Prospect attributes (name, email, company, budget, etc.)
+//   - unknowns: list of strings (optional, max 20 items, each max 100 chars) - Remaining qualification gaps
+//   - riskFlags: list of strings (required, max 20 items, each max 100 chars) - Security and red-team flags
+//   - notes: list of maps (optional, max 100 items) - Lead activity and SDR notes
+//   - suggestedOffer: map (optional, grounded offer details) - Recommended Spacenos package
+//   - bookedSlot: map (optional, demo details) - Calendar demo booking data
+//   - handoffReason: string (optional, max 2000 chars) - Human escalation rationale
+//   - handoffPriority: string (optional, enum: 'low', 'normal', 'high', 'urgent') - Escalation priority
+//   - createdAt: string/timestamp (optional, max 50 chars, immutable) - Document creation timestamp
+//   - updatedAt: string/timestamp (optional, max 50 chars) - Last update timestamp
+//   - uid: string (optional, max 128 chars, immutable) - Prospect UID for self-service leads
+//
+// Collection: conversations
+// Document ID: conversationId (e.g., 'conv-01', 'conv-m1abc2')
+// Fields:
+//   - id: string (required, 1-100 chars, immutable) - Unique conversation identifier
+//   - leadId: string (optional, 1-100 chars, immutable) - Associated lead reference
+//   - messages: list of maps (required, max 200 items) - Transcript message objects (role, content, toolCalls)
+//   - toolCallsCount: number (optional, >= 0) - Total tool invocations
+//   - extractedFacts: list of maps (optional, max 50 items) - BANT verified facts
+//   - unknownsToFollowUp: list of strings (optional, max 20 items, each max 100 chars) - Active unknowns
+//   - createdAt: string/timestamp (optional, max 50 chars, immutable) - Conversation creation timestamp
+//   - updatedAt: string/timestamp (optional, max 50 chars) - Last update timestamp
+//   - uid: string (optional, max 128 chars, immutable) - Owner prospect UID
+//
+// Collection: eval_suites
+// Document ID: suiteId (e.g., 'default_suite', 'eval-suite-01')
+// Fields:
+//   - id: string (required, 1-100 chars, immutable) - Unique eval suite ID
+//   - name: string (optional, max 200 chars) - Human-readable suite name
+//   - description: string (optional, max 2000 chars) - Evaluation suite purpose
+//   - testcases: list of maps (required, max 100 items) - Scripted test scenario objects
+//   - createdAt: string/timestamp (optional, max 50 chars, immutable) - Suite creation timestamp
+//   - updatedAt: string/timestamp (optional, max 50 chars) - Last update timestamp
+//
+// Collection: eval_reports
+// Document ID: reportId (e.g., 'report-m1abc2')
+// Fields:
+//   - id: string (required, 1-100 chars, immutable) - Unique evaluation report identifier
+//   - suiteId: string (optional, 1-100 chars, immutable) - Evaluated test suite reference ID
+//   - metrics: map (required) - Aggregate metrics: totalTests, passedTests, failedTests, extractionAccuracy, etc.
+//   - failures: list of maps (required, max 100 items) - Test failure logs and assertion diffs
+//   - testResults: list of maps (optional, max 100 items) - Per-test execution outcomes
+//   - createdAt: string/timestamp (optional, max 50 chars, immutable) - Report timestamp
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the user has administrative privileges derived from verified token claims or verified bootstrap email
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          request.auth.token.admin == true ||
+          request.auth.token.role == 'admin' ||
+          (
+            request.auth.token.email_verified == true &&
+            (
+              request.auth.token.email in ['admin@spacenos.com', 'admin@leadpilot.ai'] ||
+              request.auth.token.email.matches(".*@spacenos\\.com$")
+            )
+          )
+        );
+    }
+
+    // Check if the user is an authorized internal sales agent or admin
+    function isSalesAgent() {
+      return isAuthenticated() &&
+        (
+          isAdmin() ||
+          request.auth.token.role == 'sales_agent' ||
+          request.auth.token.role == 'agent'
+        );
+    }
+
+    // Check if user is the document owner based on uid or userId
+    function isDocOwner() {
+      return isAuthenticated() &&
+        (
+          ('uid' in resource.data && resource.data.uid == request.auth.uid) ||
+          ('userId' in resource.data && resource.data.userId == request.auth.uid)
+        );
+    }
+
+    // Check if user is creating a document associated with their own auth UID
+    function isCreatingOwnDoc() {
+      return isAuthenticated() &&
+        (
+          !('uid' in request.resource.data) ||
+          request.resource.data.uid == request.auth.uid
+        );
+    }
+
+    // Check that immutable fields have not been modified during update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Validate suggested offer map structure
+    function isValidSuggestedOffer(offer) {
+      return offer is map &&
+        offer.keys().hasOnly([
+          'packageId', 'packageName', 'pricingTier', 'billingCycle',
+          'price', 'currency', 'features', 'recommendedAddons', 'rationale', 'grounded'
+        ]) &&
+        (!('packageId' in offer) || (offer.packageId is string && offer.packageId in ['starter', 'growth', 'enterprise'])) &&
+        (!('packageName' in offer) || (offer.packageName is string && offer.packageName.size() <= 100)) &&
+        (!('pricingTier' in offer) || (offer.pricingTier is string && offer.pricingTier.size() <= 50)) &&
+        (!('billingCycle' in offer) || (offer.billingCycle is string && offer.billingCycle in ['monthly', 'annual'])) &&
+        (!('price' in offer) || (offer.price is number && offer.price >= 0)) &&
+        (!('currency' in offer) || (offer.currency is string && offer.currency.size() <= 10)) &&
+        (!('features' in offer) || (offer.features is list && offer.features.size() <= 30)) &&
+        (!('recommendedAddons' in offer) || (offer.recommendedAddons is list && offer.recommendedAddons.size() <= 20)) &&
+        (!('rationale' in offer) || (offer.rationale is string && offer.rationale.size() <= 2000)) &&
+        (!('grounded' in offer) || offer.grounded is bool);
+    }
+
+    // Validate demo booked slot map structure
+    function isValidBookedSlot(slot) {
+      return slot is map &&
+        slot.keys().hasOnly([
+          'date', 'timeSlot', 'timezone', 'attendeeEmail', 'attendeeName',
+          'notes', 'calendarLink', 'topic'
+        ]) &&
+        (!('date' in slot) || (slot.date is string && slot.date.size() <= 50)) &&
+        (!('timeSlot' in slot) || (slot.timeSlot is string && slot.timeSlot.size() <= 50)) &&
+        (!('timezone' in slot) || (slot.timezone is string && slot.timezone.size() <= 50)) &&
+        (!('attendeeEmail' in slot) || (slot.attendeeEmail is string && slot.attendeeEmail.size() <= 150)) &&
+        (!('attendeeName' in slot) || (slot.attendeeName is string && slot.attendeeName.size() <= 100)) &&
+        (!('notes' in slot) || (slot.notes is string && slot.notes.size() <= 2000)) &&
+        (!('calendarLink' in slot) || (slot.calendarLink is string && slot.calendarLink.size() <= 500)) &&
+        (!('topic' in slot) || (slot.topic is string && slot.topic.size() <= 200));
+    }
+
+    // ===============================================================
+    // Domain Validators (Applied on BOTH create and update)
+    // ===============================================================
+
+    // Domain Validator for leads/{leadId}
+    function isValidLead(data) {
+      return data.keys().hasAll(['id', 'stage', 'score', 'extractedFields', 'riskFlags']) &&
+        data.keys().hasOnly([
+          'id', 'conversationId', 'stage', 'score', 'scoreRationale',
+          'fitLevel', 'extractedFields', 'unknowns', 'riskFlags',
+          'notes', 'suggestedOffer', 'bookedSlot', 'handoffReason',
+          'handoffPriority', 'createdAt', 'updatedAt', 'uid'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 100 &&
+        (!('conversationId' in data) || (data.conversationId is string && data.conversationId.size() <= 100)) &&
+        data.stage is string && data.stage in ['new', 'qualified', 'proposal_sent', 'booked', 'won', 'lost'] &&
+        data.score is number && data.score >= 0 && data.score <= 100 &&
+        (!('scoreRationale' in data) || (data.scoreRationale is string && data.scoreRationale.size() <= 2000)) &&
+        (!('fitLevel' in data) || (data.fitLevel is string && data.fitLevel in ['low', 'medium', 'high', 'unqualified'])) &&
+        data.extractedFields is map && data.extractedFields.size() <= 30 &&
+        (!('unknowns' in data) || (data.unknowns is list && data.unknowns.size() <= 20)) &&
+        data.riskFlags is list && data.riskFlags.size() <= 20 &&
+        (!('notes' in data) || (data.notes is list && data.notes.size() <= 100)) &&
+        (!('suggestedOffer' in data) || isValidSuggestedOffer(data.suggestedOffer)) &&
+        (!('bookedSlot' in data) || isValidBookedSlot(data.bookedSlot)) &&
+        (!('handoffReason' in data) || (data.handoffReason is string && data.handoffReason.size() <= 2000)) &&
+        (!('handoffPriority' in data) || (data.handoffPriority is string && data.handoffPriority in ['low', 'normal', 'high', 'urgent'])) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50) || data.updatedAt is timestamp) &&
+        (!('uid' in data) || (data.uid is string && data.uid.size() <= 128));
+    }
+
+    // Domain Validator for conversations/{conversationId}
+    function isValidConversation(data) {
+      return data.keys().hasAll(['id', 'messages']) &&
+        data.keys().hasOnly([
+          'id', 'leadId', 'messages', 'toolCallsCount',
+          'extractedFacts', 'unknownsToFollowUp', 'createdAt', 'updatedAt', 'uid'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 100 &&
+        (!('leadId' in data) || (data.leadId is string && data.leadId.size() <= 100)) &&
+        data.messages is list && data.messages.size() <= 200 &&
+        (!('toolCallsCount' in data) || (data.toolCallsCount is number && data.toolCallsCount >= 0)) &&
+        (!('extractedFacts' in data) || (data.extractedFacts is list && data.extractedFacts.size() <= 50)) &&
+        (!('unknownsToFollowUp' in data) || (data.unknownsToFollowUp is list && data.unknownsToFollowUp.size() <= 20)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50) || data.updatedAt is timestamp) &&
+        (!('uid' in data) || (data.uid is string && data.uid.size() <= 128));
+    }
+
+    // Domain Validator for eval_suites/{suiteId}
+    function isValidEvalSuite(data) {
+      return data.keys().hasAll(['id', 'testcases']) &&
+        data.keys().hasOnly(['id', 'name', 'description', 'testcases', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 100 &&
+        (!('name' in data) || (data.name is string && data.name.size() <= 200)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 2000)) &&
+        data.testcases is list && data.testcases.size() <= 100 &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50) || data.updatedAt is timestamp);
+    }
+
+    // Domain Validator for eval_reports/{reportId}
+    function isValidEvalReport(data) {
+      return data.keys().hasAll(['id', 'metrics', 'failures']) &&
+        data.keys().hasOnly(['id', 'suiteId', 'metrics', 'failures', 'testResults', 'createdAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 100 &&
+        (!('suiteId' in data) || (data.suiteId is string && data.suiteId.size() <= 100)) &&
+        data.metrics is map &&
+        data.metrics.keys().hasAll([
+          'totalTests', 'passedTests', 'failedTests',
+          'extractionAccuracy', 'hallucinationCount', 'bookingRate', 'safetyPassRate'
+        ]) &&
+        data.metrics.totalTests is number && data.metrics.totalTests >= 0 &&
+        data.metrics.passedTests is number && data.metrics.passedTests >= 0 &&
+        data.metrics.failedTests is number && data.metrics.failedTests >= 0 &&
+        data.metrics.extractionAccuracy is number && data.metrics.extractionAccuracy >= 0 &&
+        data.metrics.hallucinationCount is number && data.metrics.hallucinationCount >= 0 &&
+        data.metrics.bookingRate is number && data.metrics.bookingRate >= 0 &&
+        data.metrics.safetyPassRate is number && data.metrics.safetyPassRate >= 0 &&
+        (!('executionTimeMs' in data.metrics) || (data.metrics.executionTimeMs is number && data.metrics.executionTimeMs >= 0)) &&
+        data.failures is list && data.failures.size() <= 100 &&
+        (!('testResults' in data) || (data.testResults is list && data.testResults.size() <= 100)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50) || data.createdAt is timestamp);
+    }
+
+    // ===============================================================
+    // Collection Security Rules
+    // ===============================================================
+
+    // ---------------------------------------------------------------
+    // 1. Leads Collection (/leads/{leadId})
+    // ---------------------------------------------------------------
+    match /leads/{leadId} {
+      // PII Protection: Only authorized sales agents, admins, or the prospect owner can read
+      allow read: if isSalesAgent() || isDocOwner();
+
+      // Creates: Authorized sales reps can create any valid lead.
+      // Authenticated prospects can create their initial lead record (must start at 'new' stage, score <= 50).
+      allow create: if (
+                        isSalesAgent() ||
+                        (isCreatingOwnDoc() && request.resource.data.stage == 'new' && request.resource.data.score <= 50)
+                      ) &&
+                      isValidLead(request.resource.data);
+
+      // Updates: Sales agents/admins can manage pipeline stages and notes.
+      // Individual prospects cannot self-escalate stages, scores, or risk flags.
+      allow update: if (
+                        isSalesAgent() ||
+                        (
+                          isDocOwner() &&
+                          areImmutableFieldsUnchanged(['stage', 'score', 'scoreRationale', 'riskFlags', 'suggestedOffer', 'notes'])
+                        )
+                      ) &&
+                      isValidLead(request.resource.data) &&
+                      areImmutableFieldsUnchanged(['id', 'createdAt', 'conversationId', 'uid']);
+
+      // Deletes: Strictly restricted to administrators
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Conversations Collection (/conversations/{conversationId})
+    // ---------------------------------------------------------------
+    match /conversations/{conversationId} {
+      // Internal sales staff or conversation owners can read chat logs
+      allow read: if isSalesAgent() || isDocOwner();
+
+      // Creates: Authenticated users or sales agents can initiate a conversation
+      allow create: if (isSalesAgent() || isCreatingOwnDoc()) &&
+                      isValidConversation(request.resource.data);
+
+      // Updates: Allowed only for internal staff or conversation owners with schema validation
+      allow update: if (isSalesAgent() || isDocOwner()) &&
+                      isValidConversation(request.resource.data) &&
+                      areImmutableFieldsUnchanged(['id', 'createdAt', 'leadId', 'uid']);
+
+      // Deletes: Strictly restricted to administrators
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 3. Eval Suites Collection (/eval_suites/{suiteId})
+    // ---------------------------------------------------------------
+    match /eval_suites/{suiteId} {
+      // Eval suites contain proprietary testcases and red-team prompts: Admin-only access
+      allow read: if isAdmin();
+
+      // Only administrators can author or update evaluation suites
+      allow create: if isAdmin() && isValidEvalSuite(request.resource.data);
+
+      allow update: if isAdmin() &&
+                      isValidEvalSuite(request.resource.data) &&
+                      areImmutableFieldsUnchanged(['id', 'createdAt']);
+
+      // Only administrators can delete evaluation suites
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // 4. Eval Reports Collection (/eval_reports/{reportId})
+    // ---------------------------------------------------------------
+    match /eval_reports/{reportId} {
+      // Evaluation benchmark reports can be viewed by sales agents and admins
+      allow read: if isSalesAgent();
+
+      // Only administrators can generate or mutate evaluation reports
+      allow create: if isAdmin() && isValidEvalReport(request.resource.data);
+
+      allow update: if isAdmin() &&
+                      isValidEvalReport(request.resource.data) &&
+                      areImmutableFieldsUnchanged(['id', 'createdAt', 'suiteId']);
+
+      // Only administrators can delete evaluation reports
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // Default Deny Rule
+    // ---------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: false;
+    }
+  }
+}
